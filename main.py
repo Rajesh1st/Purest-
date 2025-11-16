@@ -1,99 +1,102 @@
-from fastapi import FastAPI, Query, HTTPException
+# main.py
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
+from imdb import IMDb
 from typing import List, Optional
+import os
 
-# Primary source (try IMDbPY)
-try:
-    from imdb import IMDb
-    ia_primary = IMDb()
-except:
-    ia_primary = None
+app = FastAPI(title="Simple IMDb Info API")
 
-# Backup source (Cinemagoer)
-try:
-    from cinemagoer import Cinemagoer
-    ia_backup = Cinemagoer()
-except:
-    ia_backup = None
-
-
-app = FastAPI(title="Hybrid IMDb Movie API (IMDbPY + Cinemagoer)")
-
+ia = IMDb()  # imdbpy instance (uses web scraping / imdb unofficial)
 
 class MovieInfo(BaseModel):
     TITLE: str
-    YEAR: Optional[int]
-    RATING: Optional[float]
-    DURATION: Optional[str]
-    GENRE: List[str]
-    LANGUAGE: List[str]
-    ACTORS: List[str]
-    STORY_LINE: Optional[str]
-    POSTER: Optional[str]
-    IMDB_ID: Optional[str]
+    YEAR: Optional[int] = None
+    RATING: Optional[float] = None
+    DURATION: Optional[str] = None
+    GENRE: List[str] = []
+    LANGUAGE: List[str] = []
+    ACTORS: List[str] = []
+    STORY_LINE: Optional[str] = None
+    POSTER: Optional[str] = None
+    IMDB_ID: Optional[str] = None
 
+def first_or_none(lst):
+    return lst[0] if lst else None
 
-def extract_data(movie, fallback_query):
-    """Extract clean movie metadata."""
-    title = movie.get("title", fallback_query)
-    year = movie.get("year")
-    rating = movie.get("rating")
+@app.get("/movie", response_model=MovieInfo)
+def get_movie(q: str = Query(..., min_length=1, description="Movie name to search")):
+    """
+    Search IMDb for a movie by name and return metadata (title, year, rating, runtime, genres, languages, actors, storyline, poster).
+    """
+    try:
+        # Search movies (returns list of results)
+        results = ia.search_movie(q)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"IMDb search failed: {e}")
 
-    runtime_list = movie.get("runtimes", [])
-    duration = runtime_list[0] + " min" if runtime_list else None
+    if not results:
+        raise HTTPException(status_code=404, detail="No movie found matching the query.")
 
-    genres = movie.get("genres", [])
-    langs = movie.get("languages", [])
+    # Pick the top result
+    top = results[0]
+    movie_id = top.movieID
 
-    cast = movie.get("cast", [])
-    actors = [str(a) for a in cast[:10]]
+    try:
+        # fetch detailed info
+        movie = ia.get_movie(movie_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch movie details: {e}")
 
-    plot_list = movie.get("plot", [])
-    storyline = plot_list[0].split("::")[0] if plot_list else None
+    # Title & Year
+    title = movie.get('title') or top.get('title') or q
+    year = movie.get('year')
 
-    poster = movie.get("cover url")
-    imdb_id = "tt" + movie.movieID if hasattr(movie, "movieID") else None
+    # Rating
+    rating = movie.get('rating')
 
-    return MovieInfo(
+    # Duration/runtime
+    runtimes = movie.get('runtimes') or movie.get('runtime') or []
+    duration = None
+    if isinstance(runtimes, list):
+        duration = ":".join(runtimes) if runtimes else None
+    elif isinstance(runtimes, str):
+        duration = runtimes
+
+    # Genres
+    genres = movie.get('genres') or []
+
+    # Languages
+    languages = movie.get('languages') or []
+
+    # Actors (top 10)
+    cast = movie.get('cast') or []
+    actors = [str(person) for person in cast[:10]]
+
+    # Plot/storyline
+    plot_list = movie.get('plot') or movie.get('plot outline') or []
+    storyline = None
+    if isinstance(plot_list, list) and plot_list:
+        storyline = plot_list[0].split("::")[0].strip()
+    elif isinstance(plot_list, str):
+        storyline = plot_list
+
+    # Poster URL
+    poster = movie.get('cover url') or movie.get('full-size cover url') or movie.get('cover url')
+
+    imdb_id = f"tt{movie_id}" if movie_id else None
+
+    data = MovieInfo(
         TITLE=title,
         YEAR=year,
         RATING=rating,
         DURATION=duration,
         GENRE=genres,
-        LANGUAGE=langs,
+        LANGUAGE=languages,
         ACTORS=actors,
         STORY_LINE=storyline,
         POSTER=poster,
         IMDB_ID=imdb_id
     )
 
-
-@app.get("/movie", response_model=MovieInfo)
-def search_movie(q: str = Query(..., description="Movie name")):
-
-    # -------------------------------------------
-    # TRY 1: IMDbPY (Primary)
-    # -------------------------------------------
-    if ia_primary:
-        try:
-            results = ia_primary.search_movie(q)
-            if results:
-                movie = ia_primary.get_movie(results[0].movieID)
-                return extract_data(movie, q)
-        except:
-            pass  # move to fallback
-
-    # -------------------------------------------
-    # TRY 2: Cinemagoer (Backup)
-    # -------------------------------------------
-    if ia_backup:
-        try:
-            results = ia_backup.search_movie(q)
-            if results:
-                movie_id = results[0].movieID
-                movie = ia_backup.get_movie(movie_id)
-                return extract_data(movie, q)
-        except:
-            pass
-
-    raise HTTPException(status_code=404, detail="Movie not found via IMDbPY or Cinemagoer")
+    return data
